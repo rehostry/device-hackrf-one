@@ -1,0 +1,59 @@
+# Copyright 2026 Christopher Wright
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Great Scott Gadgets HackRF One (NXP LPC4320) rehosted from stock firmware.
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rehostry-hackrf-one"
+version = "0.0.1"
+description = "Great Scott Gadgets HackRF One (LPC4320 SDR) as a standalone, pip-installable HALucinator device: its real firmware, its real USB vendor-request surface."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "Christopher Wright" }]
+classifiers = [
+  "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+]
+keywords = ["halucinator", "rehosting", "firmware", "emulation", "hackrf",
+            "sdr", "usb", "lpc43xx", "cortex-m"]
+
+# Runtime deps for the standalone CLI + web panel. HALucinator itself is a
+# runtime dependency too, but it is not on PyPI, so it is NOT listed here --
+# install the dev core into the same venv
+# (`halucinator[unicorn] @ git+https://github.com/rehostry/halucinator.git@dev`)
+# so `sys.executable` / `HAL_PY` reaches it. No `HALUCINATOR_SRC` injection.
+# The attack and the panel use only the standard library; PyYAML is used by the
+# structural tests and pyzmq by halucinator's peripheral bus.
+dependencies = [
+    "pyzmq>=24",
+    "PyYAML>=6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+rehostry-hackrf-one = "rehostry_hackrf_one.cli:main"
+rehostry-hackrf-one-panel = "rehostry_hackrf_one.hackrf_one_panel:main"
+rehostry-hackrf-one-attack = "rehostry_hackrf_one.attack:main"
+
+# Forward-looking: once HALucinator gains entry-point plugin discovery, installing
+# this package will auto-register the device. Harmless until then.
+[project.entry-points."halucinator.devices"]
+hackrf-one = "rehostry_hackrf_one:paths"
+
+[project.urls]
+Homepage = "https://github.com/rehostry/device-hackrf-one"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# Ship the configs, the derived addr map and the logging.cfg that spawn_cwd()
+# picks up. Firmware bytes are NOT shipped: the HackRF firmware is GPL-2.0 and
+# belongs to Great Scott Gadgets, so it is referenced rather than redistributed
+# and tools/extract_firmware.py stages it from the vendor release.
+rehostry_hackrf_one = ["configs/*.yaml", "configs/logging.cfg"]

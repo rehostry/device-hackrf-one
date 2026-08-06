@@ -1,0 +1,107 @@
+# Copyright 2026 Christopher Wright
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Great Scott Gadgets HackRF One, firmware v2026.01.3, on a rehosted NXP
+# LPC4320 (Cortex-M4 / ARMv7E-M). HALucinator config, unicorn backend.
+#
+# STRIPPED IMAGE -- raw .bin, no ELF. The only two names in
+# hackrf_one_addrs.yaml are SYNTHETIC, recovered from the vector table by
+# tools/extract_firmware.py: the reset vector and usb0_isr. Everything else is
+# modelled at the register file. See PROVENANCE.md.
+#
+# LOAD BASE 0x00000000. The LPC43xx boot ROM maps the selected boot source into
+# the shadow region at 0, and the vendor linker script says so
+# (LPC4320_M4_memory.ld: `rom (rx) : ORIGIN = 0x00000000, LENGTH = 1M`). The
+# extractor proves the reset vector lands on code under that base.
+#
+# THE ONLY LIVE INTERRUPT IS IRQ 8 (USB0). Every other IRQ vector in this image
+# is one shared blocking handler. That is why the whole device hangs off a
+# deterministic tick on IRQ 8 -- see spawn.py.
+machine:
+  # unicorn's M-profile decoder; the CPU MODEL is selected by
+  # HAL_CORTEXM_CPU_MODEL in spawn.py (the yaml key does nothing -- playbook
+  # trap 2.120), and it must be an M4: this firmware is built
+  # -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 and touches the FPU.
+  arch: cortex-m3
+  cpu_model: cortex-m3
+  entry_addr: 0x000080d1          # reset vector, Thumb bit set
+  init_sp: 0x10087fe0             # top of LPC4320 local SRAM bank 2
+  interrupt_controller:
+    type: cortex_m
+
+memories:
+  # --- the boot shadow region: where the M4 actually executes ---------------
+  rom:
+    base_addr: 0x00000000
+    file: hackrf_one.bin
+    permissions: r-x
+    size: 0x00100000
+  # The same flash seen through the SPIFI window. `m0_rom_to_ram()` computes a
+  # physical flash address from linker symbols to fetch the M0 image before
+  # SPIFI is disabled; which alias that lands in depends on the link, so both
+  # are mapped rather than letting a stray read abort the run.
+  spifi:
+    base_addr: 0x14000000
+    file: hackrf_one.bin
+    permissions: r-x
+    size: 0x00100000
+  rom_flash:
+    base_addr: 0x80000000
+    file: hackrf_one.bin
+    permissions: r-x
+    size: 0x00100000
+
+  # --- SRAM ---------------------------------------------------------------
+  # ram_local1 0x10000000 (96K) -- .text_ram/.data/.bss live here
+  ram_local1:
+    base_addr: 0x10000000
+    permissions: rwx
+    size: 0x00020000
+  # ram_local2 0x10080000 (32K) + ram_sleep 0x10088000 (8K); init_sp is the top
+  # of the former.
+  ram_local2:
+    base_addr: 0x10080000
+    permissions: rwx
+    size: 0x0000a000
+  # AHB SRAM: ram_m0 (28K) + ram_shared (4K) + ram_usb (32K @ 0x20008000).
+  ahb_sram:
+    base_addr: 0x20000000
+    permissions: rwx
+    size: 0x00010000
+
+  halucinator-irq: { base_addr: 0x03ffc000, size: 0x00004000 }
+  halucinator:     { base_addr: 0x04000000, size: 0x00100000 }
+
+peripherals:
+  # --- the whole LPC43xx peripheral band, as ONE region + a router ---------
+  # 0x40000000..0x401FFFFF covers SCT, USB0/1, CREG, OTP, CGU/CCU/RGU, the
+  # timers, SCU, I2C, SSP, ADC, GPIO (0x400F4000) and SGPIO (0x40101000).
+  # Expressing it as one region avoids the overlap rule that would otherwise
+  # leave a modelled page mapped by neither region (playbook trap 2.39).
+  soc:
+    base_addr: 0x40000000
+    emulate: rehostry_hackrf_one.peripheral_models.lpc43xx_soc.Lpc43xxSoc
+    permissions: rw-
+    size: 0x00200000
+
+  # --- the boot ROM window ------------------------------------------------
+  # Not in the firmware image and not inventable; the IAP entry answers
+  # "not implemented", which is what a flashless LPC4320 really reports.
+  boot_rom:
+    base_addr: 0x10400000
+    emulate: rehostry_hackrf_one.peripheral_models.lpc_rom.LpcBootRom
+    permissions: r--
+    size: 0x00010000
+
+intercepts:
+  # Publish the backend + vector base + host bridge at the first instruction.
+  - class: rehostry_hackrf_one.bp_handlers.boot_init.BootInit
+    function: hackrf_reset_vector
+  # NOTE: there is deliberately NO breakpoint on `hackrf_usb0_isr`. A
+  # breakpoint hit ENDS the bounded emu chunk, and the deterministic tick is
+  # paced in chunks -- so a probe on the ISR makes every ISR entry immediately
+  # queue the next one. Measured: 605 000 ISR entries in 60 s with the boot
+  # making no forward progress at all (playbook trap 2.50, second half).
+  # The same evidence is available for free: `usb0_isr()`'s first action is to
+  # read USBSTS, and it is the only code in the image that does, so the USB0
+  # model's `isr_polls` counter IS the firmware's own ISR entry count.

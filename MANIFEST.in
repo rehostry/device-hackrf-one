@@ -1,0 +1,3 @@
+include LICENSE README.md STATUS.md PROVENANCE.md
+recursive-include src/rehostry_hackrf_one/configs *.yaml
+include src/rehostry_hackrf_one/configs/logging.cfg

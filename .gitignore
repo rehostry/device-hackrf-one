@@ -1,0 +1,20 @@
+# Firmware bytes are NEVER committed. The HackRF firmware is GPL-2.0 and belongs
+# to Great Scott Gadgets; tools/extract_firmware.py stages it from the vendor
+# release into configs/ and hard-fails on any mismatch.
+*.bin
+*.elf
+*.out
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# run artifacts
+*.log
+tmp/
+
+.DS_Store
