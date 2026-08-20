@@ -282,8 +282,20 @@ def run_attack(on_stage: Optional[Callable] = None,
         res["negative_control"] = neg
         stage("negative_control_result", **neg)
 
+        # THE M4 SEAM, named so the census can read it, and stated as what this
+        # code verifies rather than as the STATUS.md claim: an unauthenticated
+        # USB vendor control transfer goes IN on EP0 and the firmware's OWN
+        # data stage comes back OUT -- a version string it formatted itself and
+        # a board id byte matching the LPC4320 part -- while the unsupported
+        # request is refused by the firmware's own write of ENDPTCTRL0
+        # RXS|TXS, read back out of the emulator log rather than from the host
+        # state machine.
+        res["usb_vendor_round_trip"] = bool(version_ok and board_ok)
+        res["milestone"] = ("M4" if res["usb_vendor_round_trip"]
+                            else "unproven (no protocol round trip observed)")
         res["landed"] = bool(
-            version_ok and board_ok
+            res["usb_vendor_round_trip"]
+            and version_ok and board_ok
             and neg["stalled"] and neg["no_data"]
             and neg["endptctrl0_stall_logged"])
         stage("verdict", landed=res["landed"])
@@ -304,7 +316,8 @@ def main() -> int:
     print("provenance     :", json.dumps(res.get("provenance")))
     print("neg control    :", json.dumps(res.get("negative_control")))
     print("RESULT:", json.dumps({k: v for k, v in res.items()
-                                 if k in ("booted", "landed")}))
+                                 if k in ("booted", "landed", "milestone",
+                                          "usb_vendor_round_trip")}))
     return 0 if res.get("landed") else 1
 
 
