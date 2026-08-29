@@ -34,8 +34,18 @@ STATE = {
     "transfers": [],
     "verdict": "idle",
     "note": "",
+    "busy": False,
+    "run_id": 0,
 }
 _LOCK = threading.RLock()
+#: Run generation, published as ``run_id``.
+#:
+#: ``/state`` must never hand a poller a ``verdict`` that belongs to an EARLIER
+#: request. :meth:`Handler.do_POST` bumps this and clears ``verdict`` inside the
+#: SAME ``_LOCK`` acquisition that accepts the POST, and every worker write is
+#: gated on ``run_id == _GEN`` so a superseded request cannot post its answer
+#: over a newer one's.
+_GEN = 0
 _PROC = None
 _LOG = None
 _SOCK = None
@@ -53,13 +63,31 @@ REQUESTS = [
 ]
 
 
-def _note(msg: str) -> None:
+def _note(msg: str, run_id=None) -> None:
     with _LOCK:
+        if run_id is not None and run_id != _GEN:
+            return
         STATE["boot_lines"].append(msg)
         del STATE["boot_lines"][:-40]
 
 
-def _boot() -> None:
+def _finish(run_id) -> None:
+    """Clear ``busy`` only if this run is still the current one."""
+    with _LOCK:
+        if run_id == _GEN:
+            STATE["busy"] = False
+
+
+def _boot(run_id=None) -> None:
+    global _PROC, _LOG
+    try:
+        _boot_run()
+    finally:
+        if run_id is not None:
+            _finish(run_id)
+
+
+def _boot_run() -> None:
     global _PROC, _LOG
     with _LOCK:
         if _PROC is not None and _PROC.poll() is None:
@@ -117,7 +145,16 @@ def _watch() -> None:
         seen = len(lines)
 
 
-def _stop() -> None:
+def _stop(run_id=None) -> None:
+    global _PROC, _SOCK
+    try:
+        _stop_run()
+    finally:
+        if run_id is not None:
+            _finish(run_id)
+
+
+def _stop_run() -> None:
     global _PROC, _SOCK
     with _LOCK:
         if _SOCK is not None:
@@ -153,17 +190,31 @@ def _bridge():
     return s
 
 
-def _request(num: int) -> None:
+def _request(run_id, num: int) -> None:
+    """One USB vendor request, owned by ONE run.
+
+    Every write below is gated on ``run_id``: a superseded request must never
+    publish its answer over a newer one's, and the panel serves exactly one
+    request at a time (do_POST refuses a second with 409) so two replies can
+    never interleave on the single bridge socket.
+    """
+    try:
+        _request_run(run_id, num)
+    finally:
+        _finish(run_id)
+
+
+def _request_run(run_id, num: int) -> None:
     global _BUF
     s = _bridge()
     if s is None:
-        _note("the USB control bridge is not up yet")
+        _note("the USB control bridge is not up yet", run_id=run_id)
         return
     length = 1 if num in (14, 45) else 0x20
     try:
         s.sendall(("%d 0 0 %d\n" % (num, length)).encode())
     except OSError:
-        _note("the bridge closed")
+        _note("the bridge closed", run_id=run_id)
         return
     t0 = time.time()
     while b"\n" not in _BUF and time.time() - t0 < 120:
@@ -175,7 +226,7 @@ def _request(num: int) -> None:
             break
         _BUF += chunk
     if b"\n" not in _BUF:
-        _note("no reply to vendor request %d" % num)
+        _note("no reply to vendor request %d" % num, run_id=run_id)
         return
     line, _BUF = _BUF.split(b"\n", 1)
     try:
@@ -190,6 +241,8 @@ def _request(num: int) -> None:
         text = None
     name = next((n for r, n, _ in REQUESTS if r == num), "vendor(%d)" % num)
     with _LOCK:
+        if run_id != _GEN:
+            return
         STATE["transfers"].append({
             "request": num, "name": name, "setup": rec.get("setup"),
             "data": rec.get("data"), "text": text,
@@ -288,9 +341,14 @@ PAGE = """<!doctype html><meta charset=utf-8>
  </div>
 </main>
 <script>
+// A control POST that arrives while a request is outstanding is REFUSED with
+// 409 -- it is never run alongside it. Surface it, so the operator sees the
+// click did not start a request rather than reading the previous request's
+// answer as this one's.
 function act(what, n){
   fetch('/act?what='+what+(n!==undefined?'&n='+n:''),{method:'POST'})
-    .then(poll);
+    .then(r=>{if(r.status===409){document.getElementById('verdict').textContent=
+      'refused 409 - a request is already outstanding';} poll();});
 }
 function esc(s){return (s===null||s===undefined)?'':String(s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;');}
@@ -344,19 +402,66 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, "text/html; charset=utf-8", PAGE.encode())
 
     def do_POST(self):  # noqa: N802
+        global _GEN
         from urllib.parse import parse_qs, urlparse
         q = parse_qs(urlparse(self.path).query)
         what = (q.get("what") or [""])[0]
-        if what == "boot":
-            _boot()
-        elif what == "stop":
-            _stop()
-        elif what == "req":
+        if what == "req":
             try:
-                _request(int((q.get("n") or ["15"])[0]))
+                num = int((q.get("n") or ["15"])[0])
             except ValueError:
-                pass
-        self._send(200, "application/json", b"{}")
+                self._send(400, "application/json",
+                           b'{"ok":false,"reason":"bad request number"}')
+                return
+            worker, extra = _request, (num,)
+        elif what == "boot":
+            worker, extra = _boot, ()
+        elif what == "stop":
+            worker, extra = _stop, ()
+        else:
+            self._send(404, "application/json",
+                       b'{"ok":false,"reason":"unknown action"}')
+            return
+
+        # ACCEPTING the POST and SUPERSEDING the previous run are ONE atomic
+        # step, under the same lock `/state` reads.
+        #
+        # The shape this replaces ran the vendor request ON THE REQUEST THREAD
+        # with no busy flag at all, so a second POST arriving while one was
+        # outstanding ran CONCURRENTLY -- two replies interleaving on the one
+        # bridge socket and the shared _BUF -- and answered 200 either way. For
+        # the whole of that window `/state` went on serving the PREVIOUS
+        # request's `verdict`, byte for byte, so the NEGATIVE CONTROL (request
+        # 13, which the firmware must reject) read as the previous read's
+        # "answered ...".
+        #
+        # So: a POST that cannot run now is REFUSED (409), never run alongside;
+        # and a POST that is accepted clears the previous verdict before this
+        # method returns.
+        with _LOCK:
+            if STATE["busy"]:
+                self._send(409, "application/json", json.dumps(
+                    {"ok": False, "busy": True, "verdict": STATE["verdict"],
+                     "run_id": STATE["run_id"]}).encode())
+                return
+            if what == "req" and not STATE["running"]:
+                self._send(409, "application/json", json.dumps(
+                    {"ok": False, "reason": "not booted",
+                     "run_id": STATE["run_id"]}).encode())
+                return
+            _GEN += 1
+            run_id = _GEN
+            STATE.update(busy=True, run_id=run_id,
+                         verdict="accepted (run %d)" % run_id)
+            try:
+                threading.Thread(target=worker, args=(run_id,) + extra,
+                                 daemon=True).start()
+            except Exception:  # noqa: BLE001
+                # never strand the panel in a permanent busy state
+                STATE.update(busy=False, verdict="error")
+                raise
+        self._send(200, "application/json",
+                   json.dumps({"ok": True, "run_id": run_id}).encode())
 
 
 def main() -> int:
