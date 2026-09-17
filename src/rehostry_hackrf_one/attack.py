@@ -164,10 +164,21 @@ class _Rehost:
                 time.sleep(1)
         return False
 
-    def vendor_request(self, request: int, length: int = 0x20) -> Optional[dict]:
-        """Issue one vendor control transfer and return the firmware's answer."""
+    def vendor_request(self, request: int, length: int = 0x20,
+                       value: int = 0, index: int = 0) -> Optional[dict]:
+        """Issue one vendor control transfer and return the firmware's answer.
+
+        ⚠ `value` and `index` were hardcoded to 0 here, even though the bridge's
+        own line protocol has always accepted them
+        (`<request> [value] [index] [length]`). That made half this firmware's
+        command surface undrivable from the attack: every HackRF register write
+        carries its payload in wValue/wIndex and has no data stage at all, so
+        with both pinned to 0 the only thing that could be exercised was the
+        handful of parameterless reads.
+        """
         assert self._sock is not None
-        self._sock.sendall(("%d 0 0 %d\n" % (request, length)).encode())
+        self._sock.sendall(("%d %d %d %d\n"
+                            % (request, value, index, length)).encode())
         deadline = time.time() + REPLY_TIMEOUT
         while b"\n" not in self._buf and time.time() < deadline:
             try:
@@ -184,6 +195,221 @@ class _Rehost:
             return json.loads(line)
         except ValueError:
             return None
+
+
+# ---------------------------------------------------------------------------
+# THE LADDER.
+#
+# Before 2026-09-17 `milestone` took exactly two values:
+#
+#     res["milestone"] = "M4" if res["usb_vendor_round_trip"] else \
+#                        "unproven (no protocol round trip observed)"
+#
+# M0..M3 were unreachable, M6/M7 did not exist, and the negative arm was a
+# PROSE STRING that no milestone parser can read -- the fleet guard turns it
+# into "-" and the row scores a bare WALL with no rung at all. `STATUS.md`
+# argued M1, M2 and M3 at length in English while the code could not emit any
+# of them.
+#
+# M5/M8 are NOT in this tuple. This image's entire command surface is vendor
+# control transfers on USB0 EP0 -- one endpoint, one framing layer, one peer --
+# which RULES.md 1a settles as ONE interface, so M5 is undefined and the
+# inventory has one entry, which 1b's boundary puts at M8-undefined.
+LADDER_RUNGS = ("M0", "M1", "M2", "M3", "M4", "M6", "M7")
+
+LADDER_FACTS = ("guest_executed", "own_init", "drives_own_interface",
+                "round_trip", "m6_measured", "m6_ok", "m7_measured", "m7_ok")
+
+#: The stateful pair, CHOSEN BY MEASUREMENT, not from memory of libhackrf.
+#: The firmware's own dispatch table was swept live (requests 0..38, each
+#: bracketed by a known-good canary) and three write/read pairs were tried:
+#:
+#:     2 MAX2837_WRITE  / 3 MAX2837_READ    -> read answers a CONSTANT 0x0150
+#:     4 SI5351C_WRITE  / 5 SI5351C_READ    -> read answers 0
+#:     8 RFFC5071_WRITE / 9 RFFC5071_READ   -> reads back what was written
+#:
+#: Only the third holds state. That the other two do NOT is what makes this
+#: evidence rather than an echo: a harness or a bus model reflecting writes
+#: back would have made all three pass.
+REQ_RFFC5071_WRITE = 8
+REQ_RFFC5071_READ = 9
+#: Registers written in the simultaneity arm. An echo of "the last value
+#: written" cannot hold two different values at two different indices.
+M6_REGS = (0, 5, 11)
+
+
+def rung_num(ms: Optional[str]) -> int:
+    import re
+    m = re.match(r"M(\d+)", ms or "")
+    return int(m.group(1)) if m else -1
+
+
+def _ladder(f: dict) -> str:
+    if not f.get("guest_executed"):
+        return "M0"
+    if not f.get("own_init"):
+        return "M1"
+    if not f.get("drives_own_interface"):
+        return "M2"
+    if not f.get("round_trip"):
+        return "M3"
+    if not f.get("m6_measured") or not f.get("m6_ok"):
+        return "M4"
+    if not f.get("m7_measured") or not f.get("m7_ok"):
+        return "M6"
+    return "M7"
+
+
+def _canary_ok(rh) -> bool:
+    """The known-good request, used to prove the seam was healthy IMMEDIATELY
+    BEFORE each probe.
+
+    ⚠ This is not decoration on this device. A live sweep of the firmware's own
+    dispatch table wedged after request 38 WITH THE GUEST STILL EXECUTING (the
+    backend went on reporting exception returns inside the SPI transfer loop),
+    and every request after it returned nothing. A wall of non-answers here is
+    a real possibility and reads exactly like "the firmware went deaf after
+    malformed input". The tell is whether the request BEFORE it answered.
+    """
+    got = rh.vendor_request(REQ_VERSION_STRING_READ, length=0x20)
+    if not got or got.get("status") != "ok" or not got.get("data"):
+        return False
+    return _valid_version_string(bytes.fromhex(got["data"].replace(" ", "")))
+
+
+def _rffc_write(rh, reg: int, val: int) -> None:
+    """HACKRF_VENDOR_REQUEST_RFFC5071_WRITE -- an ACK-only vendor request that
+    carries its payload entirely in wValue/wIndex, with NO data stage. It is
+    therefore issued with wLength 0; a non-zero length leaves the host waiting
+    for a data stage the firmware will never start."""
+    rh.vendor_request(REQ_RFFC5071_WRITE, length=0, value=val, index=reg)
+
+
+def _rffc_read(rh, reg: int) -> Optional[int]:
+    got = rh.vendor_request(REQ_RFFC5071_READ, length=2, value=0, index=reg)
+    if not got or got.get("status") != "ok" or not got.get("data"):
+        return None
+    raw = bytes.fromhex(got["data"].replace(" ", ""))
+    return int.from_bytes(raw, "little") if len(raw) == 2 else None
+
+
+def m6_register_rounds(rh, rounds: int, rng,
+                       on_stage: Optional[Callable] = None) -> list:
+    """M6 -- STATEFUL.
+
+    One input (`RFFC5071_READ` of register r) answers differently and correctly
+    for each attacker-chosen prior state. Every value is drawn at RUN TIME, so
+    it is in no image, model, handler or file.
+
+    It is a CYCLE, not a ratchet: any round can write any value to any
+    register, so round r+1 starts from a state round r can reach and Rule 2's
+    `passed == rounds` is satisfiable.
+
+    The simultaneity arm is what separates state from an echo: three registers
+    are loaded with three DIFFERENT values and then all three are read back. A
+    model or harness reflecting "the last value written" answers all three the
+    same and fails.
+    """
+    out = []
+    no_write = os.environ.get("HAL_HRF_M6_NO_WRITE") == "1"
+    for r in range(rounds):
+        rec: dict = {"round": r}
+        if not _canary_ok(rh):
+            rec["verdict"] = "VOID-canary-before"
+            out.append(rec)
+            if on_stage:
+                on_stage("m6_round", msg="round %d VOID: the seam was not "
+                                         "healthy before the probe" % r)
+            continue
+        want = {reg: rng.randrange(1, 0x1000) for reg in M6_REGS}
+        if not no_write:
+            for reg, v in want.items():
+                _rffc_write(rh, reg, v)
+        got = {reg: _rffc_read(rh, reg) for reg in M6_REGS}
+        rec["wrote"] = want
+        rec["read"] = got
+        rec["all_match"] = all(got[reg] == want[reg] for reg in M6_REGS)
+        rec["distinct"] = len({v for v in got.values() if v is not None}) == \
+            len(M6_REGS)
+        rec["passed"] = bool(rec["all_match"] and rec["distinct"])
+        rec["verdict"] = "OK" if rec["passed"] else "MISMATCH"
+        out.append(rec)
+        if on_stage:
+            on_stage("m6_round", msg="round %d wrote %s read %s passed=%s"
+                     % (r, want, got, rec["passed"]))
+    return out
+
+
+def m7_classes() -> list:
+    """M7 classes.
+
+    Deliberately confined to requests <= 33. The live sweep showed the seam
+    stops answering after request 38 while the guest keeps executing, and an
+    unexplored region is not a tolerance claim -- it is unfinished work, and it
+    is reported as such rather than folded in as a class that "failed".
+    """
+    return [
+        ("H1-null-dispatch-slot-13", dict(request=13, length=0x20),
+         "the firmware's own dispatch table has NULL here", "stall"),
+        ("H2-null-dispatch-slot-0", dict(request=0, length=0x20),
+         "request 0 is not a vendor request this firmware implements", "stall"),
+        ("H3-null-dispatch-slot-25", dict(request=25, length=0x20),
+         "another NULL slot found by sweeping the table", "stall"),
+        ("H4-read-register-out-of-range",
+         dict(request=REQ_RFFC5071_READ, length=2, value=0, index=0x00FF),
+         "RFFC5071_READ for a register index past the device's file", "any"),
+        ("H5-write-value-saturated",
+         dict(request=REQ_RFFC5071_WRITE, length=0, value=0xFFFF, index=0x00FF),
+         "every payload bit set, on an out-of-range register", "any"),
+        ("H6-huge-wlength",
+         dict(request=REQ_VERSION_STRING_READ, length=0xFFFF),
+         "a supported read asked for 65535 bytes -- far past what the "
+         "firmware has to give", "any"),
+    ]
+
+
+def m7_tolerance(rh, on_stage: Optional[Callable] = None) -> list:
+    """⚠ Pre-probe AND post-probe, and the pre-probe decides.
+
+    A `wLength` far past the firmware's data stage is exactly the shape that
+    has wedged a HOST USB model on this fleet before, producing a wall of
+    timeouts indistinguishable from a firmware that went deaf. H6 is therefore
+    LAST, so the classes before it are already recorded if it takes the seam
+    down, and its own verdict is gated on the pre-probe like every other.
+    """
+    out = []
+    for name, kw, why, expect in m7_classes():
+        rec: dict = {"class": name, "why": why, "expect": expect,
+                     "request": kw["request"], "wlength": kw["length"]}
+        rec["pre_ok"] = _canary_ok(rh)
+        if not rec["pre_ok"]:
+            rec["verdict"] = "VOID-pre-probe-failed"
+            out.append(rec)
+            if on_stage:
+                on_stage("m7_class", msg="%s VOID: the seam was not healthy "
+                                         "BEFORE the malformed input, so this "
+                                         "is not a finding" % name)
+            continue
+        got = rh.vendor_request(**kw)
+        rec["stalled"] = bool((got or {}).get("stalled"))
+        rec["status"] = (got or {}).get("status")
+        rec["data_len"] = len(bytes.fromhex(
+            (got or {}).get("data", "").replace(" ", ""))) if got and \
+            got.get("data") else 0
+        # The firmware's OWN refusal, where one is demanded: usb_endpoint_stall()
+        # writes ENDPTCTRL0 = RXS|TXS. Read from the emulator log, not from the
+        # host state machine's opinion.
+        rec["handled"] = (rec["stalled"] if expect == "stall" else True)
+        rec["post_ok"] = _canary_ok(rh)
+        rec["verdict"] = ("TOLERATED" if (rec["handled"] and rec["post_ok"])
+                          else "SEAM-DEAF-AFTER" if rec["handled"]
+                          else "NOT-REFUSED")
+        out.append(rec)
+        if on_stage:
+            on_stage("m7_class", msg="%s pre=%s stalled=%s post=%s -> %s"
+                     % (name, rec["pre_ok"], rec["stalled"], rec["post_ok"],
+                        rec["verdict"]))
+    return out
 
 
 def run_attack(on_stage: Optional[Callable] = None,
@@ -207,25 +433,63 @@ def run_attack(on_stage: Optional[Callable] = None,
         "provenance": None,
         "negative_control": None,
         "log": None,
+        # ⚠ `milestone` used to be seeded absent and then set to one of exactly
+        # two values, the negative one being the PROSE STRING "unproven (no
+        # protocol round trip observed)". No milestone parser can read that:
+        # the fleet guard turns it into "-" and the row scores a bare WALL with
+        # no rung. M0 is the rung a run that produced nothing has earned.
+        "milestone": "M0",
     }
+    facts: dict = {k: False for k in LADDER_FACTS}
+    res["facts"] = facts
     rh = _Rehost(log_dir)
     res["log"] = rh.log
     try:
         stage("boot", msg="booting the LPC4320 rehost")
         rh.start()
 
-        if not rh.wait_enumerated(BOOT_TIMEOUT):
-            res["error"] = ("the firmware did not complete USB enumeration "
-                            "within %.0fs" % BOOT_TIMEOUT)
-            stage("boot_failed", msg=res["error"])
-            return res
-        res["booted"] = True
-        res["enumerated"] = True
+        enum_ok = rh.wait_enumerated(BOOT_TIMEOUT)
 
+        # ---- M1/M2/M3 facts, measured on EVERY path ------------------------
+        # ⚠ These used to be measured only AFTER the enumeration gate, so a run
+        # that booted, executed, bit-banged 98 rows of CPLD configuration and
+        # then stopped because its own verify refused reported
+        # `guest_executed: false` and printed M0 -- the SAME rung as a run with
+        # no firmware on disk at all. That is a downward false floor, and it
+        # lands on exactly the arm whose whole purpose is to show the low rungs
+        # are reachable with the guest running.
         text = rh.log_text()
         for line in text.splitlines():
             if "VID:PID = " in line:
                 res["vid_pid"] = line.split("VID:PID = ")[1].strip()
+        # guest_executed: the backend reports the guest taking and returning
+        # from its own interrupts, and the firmware's own JTAG bit-bang reached
+        # the CPLD model. A count, not a boolean, so a witness pinned at zero on
+        # a live device is visible rather than silent.
+        res["irq_events"] = text.count("inject_irq(")
+        res["cpld_rows"] = text.count("CPLD SRAM row")
+        facts["guest_executed"] = bool(res["irq_events"] > 0
+                                       or res["cpld_rows"] > 0)
+        # own_init: the firmware programmed its OWN USB device controller --
+        # it published its queue-head array in ENDPOINTLISTADDR and set
+        # USBCMD.RS. Both are register writes the GUEST made; the model only
+        # reports them.
+        facts["own_init"] = ("ENDPOINTLISTADDR" in text and "USBCMD" in text)
+        # drives_own_interface: the firmware composed and transmitted its own
+        # DEVICE descriptor -- the VID:PID above is parsed out of the bytes the
+        # guest put on EP0, not out of any constant in this package.
+        facts["drives_own_interface"] = bool(res["vid_pid"])
+
+        if not enum_ok:
+            res["error"] = ("the firmware did not complete USB enumeration "
+                            "within %.0fs" % BOOT_TIMEOUT)
+            res["milestone"] = _ladder(facts)
+            res["landed"] = rung_num(res["milestone"]) >= 4
+            stage("boot_failed", msg=res["error"], milestone=res["milestone"],
+                  irq_events=res["irq_events"], cpld_rows=res["cpld_rows"])
+            return res
+        res["booted"] = True
+        res["enumerated"] = True
         stage("enumerated", vid_pid=res["vid_pid"])
 
         if not rh.connect():
@@ -291,14 +555,45 @@ def run_attack(on_stage: Optional[Callable] = None,
         # RXS|TXS, read back out of the emulator log rather than from the host
         # state machine.
         res["usb_vendor_round_trip"] = bool(version_ok and board_ok)
-        res["milestone"] = ("M4" if res["usb_vendor_round_trip"]
-                            else "unproven (no protocol round trip observed)")
-        res["landed"] = bool(
+        facts["round_trip"] = bool(
             res["usb_vendor_round_trip"]
-            and version_ok and board_ok
             and neg["stalled"] and neg["no_data"]
             and neg["endptctrl0_stall_logged"])
-        stage("verdict", landed=res["landed"])
+
+        # ---- M6 / M7 ------------------------------------------------------
+        import random
+        seed = int(time.time() * 1000) & 0xFFFF
+        res["seed"] = seed
+        rng = random.Random(seed)
+        if facts["round_trip"]:
+            rounds = int(os.environ.get("HAL_HRF_M6_ROUNDS", "5"))
+            m6 = m6_register_rounds(rh, rounds, rng, on_stage=stage)
+            res["m6"] = m6
+            res["m6_rounds"] = len(m6)
+            res["m6_passed"] = sum(1 for r in m6 if r.get("passed"))
+            res["m6_void"] = sum(1 for r in m6
+                                 if str(r.get("verdict", "")).startswith("VOID"))
+            facts["m6_measured"] = bool(m6) and res["m6_void"] == 0
+            # Rule 2: N of N. Never `>= 1`.
+            facts["m6_ok"] = bool(facts["m6_measured"]
+                                  and res["m6_passed"] == len(m6))
+
+            m7 = m7_tolerance(rh, on_stage=stage)
+            res["m7"] = m7
+            res["m7_total"] = len(m7)
+            res["m7_void"] = sum(1 for c in m7
+                                 if c["verdict"].startswith("VOID"))
+            res["m7_tolerated"] = sum(1 for c in m7
+                                      if c["verdict"] == "TOLERATED")
+            facts["m7_measured"] = bool(m7) and res["m7_void"] == 0
+            facts["m7_ok"] = bool(facts["m7_measured"]
+                                  and res["m7_total"] >= 3
+                                  and res["m7_tolerated"] == len(m7))
+
+        res["milestone"] = _ladder(facts)
+        # `landed` is M4 and only M4 (RULES.md 5).
+        res["landed"] = rung_num(res["milestone"]) >= 4
+        stage("verdict", landed=res["landed"], milestone=res["milestone"])
         return res
     finally:
         rh.stop()
@@ -317,7 +612,12 @@ def main() -> int:
     print("neg control    :", json.dumps(res.get("negative_control")))
     print("RESULT:", json.dumps({k: v for k, v in res.items()
                                  if k in ("booted", "landed", "milestone",
-                                          "usb_vendor_round_trip")}))
+                                          "usb_vendor_round_trip", "facts",
+                                          "seed", "irq_events", "cpld_rows",
+                                          "vid_pid",
+                                          "m6_passed", "m6_rounds", "m6_void",
+                                          "m7_tolerated", "m7_total",
+                                          "m7_void")}))
     return 0 if res.get("landed") else 1
 
 

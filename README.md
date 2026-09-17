@@ -11,6 +11,32 @@ from its strap resistors, configures its CPLD over a bit-banged JTAG port,
 brings up its USB device controller, **enumerates**, and then answers the
 `hackrf_*` vendor control transfers that are its entire command surface.
 
+**Milestone: M7** (was M4 until 2026-09-17). The firmware answers an
+unauthenticated vendor control transfer in bytes it formatted itself and refuses
+an unsupported one by writing its own stall bit (**M4**); its RFFC5071 register
+file holds three different run-time-chosen values at three different indices and
+reads each back correctly, 5 of 5 rounds on each of three arms (**M6**); and 6
+of 6 malformed-input classes are handled with a known-good request answered
+immediately before *and* after each one (**M7**).
+
+The M6 pair was **chosen by measurement**: the firmware's own dispatch table was
+swept live, and of the three candidate write/read pairs, MAX2837 answers a
+constant and SI5351C answers zero — only RFFC5071 holds state. That two of three
+fail is what makes the third evidence rather than an echo.
+
+Two falsification knobs, both non-inert and neither touching a firmware byte:
+`HAL_HRF_M6_NO_WRITE=1` takes M6 to 0/5 while M4 and all six M7 classes stand,
+and `HAL_HRF_CPLD_CORRUPT=1` returns the modelled CPLD readback with **one bit
+wrong** so the firmware's own verify refuses its own configuration — that arm
+prints **M1 with 2847 IRQ events**, against **M0 with 0** for a run with no
+firmware on disk.
+
+⚠ **Open, and not claimed:** the seam stops answering after vendor request 38
+while the guest keeps executing. Whether that is the firmware or our host USB
+model is unresolved, and the M7 classes are confined to requests ≤ 33 because of
+it. **M5 / M8 are undefined** — one EP0 control seam is one interface (§1a), and
+a one-entry inventory is M8-undefined (§1b). See `STATUS.md`.
+
 ```
 $ rehostry-hackrf-one-attack
 [boot] msg=booting the LPC4320 rehost

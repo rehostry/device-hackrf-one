@@ -44,7 +44,12 @@ from . import paths
 #: The host-facing seam: a line-oriented TCP bridge onto the USB **control
 #: endpoint**. A HackRF One has no console and no network -- vendor control
 #: transfers are its entire command surface.
-BRIDGE_PORT = 21209
+#: ⚠ This must read the SAME env var the child is given below
+#: (`env.setdefault("HAL_HRF_USB_PORT", ...)`). It used to be a bare constant,
+#: so exporting HAL_HRF_USB_PORT moved the GUEST's listener while the client
+#: went on dialling 21209 -- the two halves silently disagreed and every arm
+#: after the first looked like a boot that never came up.
+BRIDGE_PORT = int(os.environ.get("HAL_HRF_USB_PORT", "21209"))
 USB_SEAM = "USB0 EP0 control endpoint (hackrf_* vendor requests)"
 
 #: ZMQ peripheral-bus ports. peripheral_server.start() BINDS machine-global ipc

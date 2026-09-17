@@ -1,4 +1,4 @@
-<!-- rehostry-census: milestone=M4 landed=true verdict=M4-OK verified=2026-08-28 method=live-run -->
+<!-- rehostry-census: milestone=M7 landed=true verdict=M4-OK verified=2026-09-17 method=live-run n=5of5 note=M6-and-M7-measured-live-2026-09-17-lane-s0917-laneG;M6-5of5-RFFC5071-register-file-3-regs-hold-distinct-run-time-values;M7-6of6-classes-0-VOID-confined-to-requests-le-33;the-seam-stops-answering-after-request-38-with-the-guest-still-executing-UNEXPLAINED;M5-M8-undefined-one-EP0-control-seam -->
 <!-- Copyright 2026 Christopher Wright; SPDX-License-Identifier: AGPL-3.0-or-later -->
 # STATUS — device-hackrf-one
 
@@ -14,6 +14,170 @@ firmware refuses.
 | Seam | **USB0 EP0** — `hackrf_*` vendor-specific control transfers |
 | Core | installed `halucinator@dev` (Bucket A — **no core change**) |
 | Bridge / panel | tcp/**21209** · http/**9019** · ZMQ 6118/6119 |
+
+---
+
+## M6 / M7 — measured live 2026-09-17 (lane `s0917-laneG`)
+
+**Milestone: M7.** This row has argued M1, M2 and M3 in English since it was
+written, while the code could not emit any of them. `milestone` took exactly
+**two** values:
+
+```python
+res["milestone"] = ("M4" if res["usb_vendor_round_trip"]
+                    else "unproven (no protocol round trip observed)")
+```
+
+and on the boot-failure path the key was **absent entirely**. The negative value
+is a prose string no milestone parser can read: the fleet guard's
+`_milestone_num` turns it into `-` and the row scores a bare `WALL` with no rung
+at all. Enumerated, that is **384 of 512 assignments** landing in one
+undifferentiated `WALL` bucket.
+
+### The ladder, enumerated over all 512 assignments (`tools/enumerate_ladder.py`)
+
+|  | BEFORE (`4d7c7ed`) | AFTER (imported) |
+|---|---|---|
+| PRINTABLE | `<absent>`, `M4`, `unproven (no protocol round trip observed)` | `M0,M1,M2,M3,M4,M6,M7` |
+| WRITTEN (`ast` over `_ladder`) | n/a — no `_ladder` existed | `M0,M1,M2,M3,M4,M6,M7` |
+| DECLARED (`LADDER_RUNGS`) | n/a | `M0,M1,M2,M3,M4,M6,M7` |
+| PRINTABLE == WRITTEN == DECLARED | — | **True** |
+| dead branches | — | **none** |
+| credited `M4-OK` | 64 of 512 | 32 of 512 |
+| `DEFECT-landed-without-M4` | 0 | 0 |
+| assignments gaining a NEW `M4-OK` credit | — | 16 |
+| … of which **UNEARNED** (no round trip) | — | **0** |
+| … of which **REALISABLE** | — | **0** |
+| false floor **UP** (printed > entitled) | 96 | **0** |
+| … of which printed a rung with `guest_executed` false | 64 | **0** |
+| false floor **DOWN** (M6/M7 earned, printed lower) | 8 | **0** |
+| guard histogram BEFORE | `WALL: 384`, `M4-OK: 64`, `WALL-M4: 64` | |
+| guard histogram AFTER | | `WALL-M0: 256, WALL-M1: 128, WALL-M2: 64, WALL-M3: 32, M4-OK: 32` |
+
+⚠ **The 16 "new credits" are an artefact of the enumeration's fact model, and
+that is stated rather than papered over.** `neg_stalled` is a free boolean here
+because in the old code it was independent of the rung. In the new code it is a
+**component** of `round_trip` (§1c: a discriminating round trip needs valid
+accepted *and* invalid rejected), so `round_trip → neg_stalled` and every one of
+those 16 assignments is unreachable in a real run. Restricted to realisable
+assignments the gain is **0**, and the enumerator prints both numbers.
+
+### M6 — stateful, and the pair was CHOSEN BY MEASUREMENT
+
+The firmware's own dispatch table was swept live (requests 0..38, each bracketed
+by a known-good canary, PORTBASE 33410). It STALLs at 0, 13, 22, 25, 26 and
+answers elsewhere. Three write/read pairs could carry state, and all three were
+tried (PORTBASE 33420):
+
+| pair | requests | read answers |
+|---|---|---|
+| MAX2837 | 2 / 3 | a **constant** `0x0150` on every round |
+| SI5351C | 4 / 5 | `0` on every round |
+| **RFFC5071** | **8 / 9** | **reads back exactly what was written** |
+
+**That two of the three do NOT hold state is what makes the third evidence
+rather than an echo.** A harness or a bus model reflecting writes would have
+made all three pass.
+
+Each write is an **ACK-only** vendor request carrying its payload entirely in
+`wValue`/`wIndex` with no data stage, so it is issued with `wLength = 0`. A
+non-zero length leaves the host waiting for a data stage the firmware never
+starts — which is exactly why the first sweep mis-read every write slot as
+"timeout".
+
+M6 then writes **three** registers (0, 5, 11) with three **different** values
+drawn at run time and reads all three back. An echo of "the last value written"
+answers all three the same and fails. **5 of 5 rounds on each of three live
+arms.**
+
+### Where the state lives — answered by the knob, not by argument
+
+With `HAL_HRF_M6_NO_WRITE=1` the writes are withheld and nothing else changes.
+The three registers then return **three different constants, stable across all
+five rounds**:
+
+```
+reg 0  -> 0xfffa      reg 5  -> 0xb0bf      reg 11 -> 0x0400
+```
+
+Those are the firmware's own reset defaults for those registers, out of its own
+table. So the read path is **per-register** and returns firmware state — not an
+echo, and not a single reflected value.
+
+### M7 — 6 of 6 classes, 0 VOID
+
+| class | input | verdict |
+|---|---|---|
+| H1 | request 13 — NULL in the firmware's own dispatch table | STALL, TOLERATED |
+| H2 | request 0 — NULL | STALL, TOLERATED |
+| H3 | request 25 — NULL | STALL, TOLERATED |
+| H4 | `RFFC5071_READ` for register index `0x00ff` | refused, TOLERATED |
+| H5 | `RFFC5071_WRITE` value `0xffff` to register `0x00ff` | refused, TOLERATED |
+| H6 | a supported read asked for `wLength = 0xffff` | TOLERATED |
+
+Every class is **pre**-probed as well as post-probed.
+
+⚠ **H6 was pre-registered as the highest risk of a manufactured class on this
+row** — a large `wLength` is the exact shape that has wedged a host USB model on
+this fleet before, producing a wall of timeouts indistinguishable from a
+firmware that went deaf. It is ordered **last** so the classes before it are
+already recorded if it takes the seam down. Measured: it did **not** wedge
+anything; the canary answered immediately before and immediately after.
+
+### Falsification knobs — two, both demonstrably non-inert
+
+| arm | PORTBASE | milestone | IRQ events | M6 | M7 |
+|---|---|---|---|---|---|
+| live | 33430 | **M7** | 19 | 5/5 | 6/6 |
+| live | 33480 | **M7** | 19 | 5/5 | 6/6 |
+| live | 33490 | **M7** | 21 | 5/5 | 6/6 |
+| `HAL_HRF_M6_NO_WRITE=1` | 33440 | **M4** | 19 | **0/5** | 6/6 |
+| `HAL_HRF_CPLD_CORRUPT=1` | 33460 | **M1** | **2847** | — | — |
+| **no firmware** | 33470 | **M0** | **0** | — | — |
+
+`HAL_HRF_M6_NO_WRITE` is **surgical**: M6 falls to 0/5 while M4 and all six M7
+classes are untouched. `HAL_HRF_CPLD_CORRUPT` is the stronger shape — the
+modelled CPLD readback returns **one bit wrong**, so the firmware's own
+`cpld_xc2c64a_jtag_sram_verify()` refuses its own configuration and it never
+programs the USB controller. **No firmware byte is edited.**
+
+The bottom three rows are the point: **M1 with 2847 IRQ events is a different
+thing from M0 with 0**, and the run says which. That distinction did not exist
+before today — see below.
+
+### A downward false floor found on the knob arm itself
+
+The first `HAL_HRF_CPLD_CORRUPT` run printed `milestone: M0` with
+`guest_executed: false`, because the M1/M2/M3 witnesses were measured **after**
+the enumeration gate and the knob returns before it. A run that booted,
+executed, and bit-banged CPLD configuration rows before its own verify refused
+was therefore reporting the **same rung as a run with no firmware on disk** —
+and it landed on exactly the arm whose purpose is to show the low rungs are
+reachable with the guest running. The witnesses are now measured on every path.
+
+### One real gap in the client
+
+`_Rehost.vendor_request` hardcoded `wValue` and `wIndex` to 0, even though the
+bridge's own line protocol has always accepted them. Every HackRF register write
+carries its payload in those two fields and has no data stage, so with both
+pinned to 0 **half this firmware's command surface was undrivable from the
+attack** — only the handful of parameterless reads could be exercised. And
+`spawn.BRIDGE_PORT` was a bare constant while the child was given
+`HAL_HRF_USB_PORT`, so relocating the port moved the guest's listener and left
+the client dialling 21209.
+
+### ⚠ NOT CLAIMED, and open
+
+* **The seam stops answering after request 38, with the guest still executing.**
+  The sweep wedged there: the backend went on reporting exception returns inside
+  the SPI transfer loop while every subsequent request, canary included,
+  returned nothing. Whether that is the firmware or our host USB model is
+  **unresolved**, and it is why the M7 classes are confined to requests ≤ 33.
+  **An unexplored region is not a tolerance claim** — it is unfinished work.
+* **M5 and M8 are UNDEFINED.** This image's entire command surface is vendor
+  control transfers on USB0 EP0 — one endpoint, one framing layer, one peer —
+  which §1a settles as one interface, and a one-entry inventory is M8-undefined
+  per §1b's boundary. M6/M7 do not require M5 (§1a ruling, 2026-09-02).
 
 ---
 
