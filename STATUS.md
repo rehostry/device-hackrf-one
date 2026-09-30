@@ -601,6 +601,29 @@ no-replies of 49**. ⚠ It also predates the Rule 2 fix and was credited M4 off
 All of these, and the check-3 adjudication, are written up in
 `scratch-batch-s0929-laneL/CHECK3-ADJUDICATION.md`.
 
+### RULES.md §1a, ruling of 2026-09-30 — and this row had the worst version of the hole it names
+
+The ruling says a fault after the boot does not un-boot the guest, but that it
+*"bars every rung whose evidence comes after it, and must be recorded rather than
+absorbed"*; it warns that a row reporting a bare `faults=0` while faulting after
+its round trip is **hiding** the fault.
+
+⚠⚠ **This row was worse than that: it reported no fault count AT ALL.** The
+ladder had no fault term and the RESULT line had no `faults` key, so there was
+nothing to hide behind and nothing to read. Fixed: `FAULT_MARKERS`
+(`UC_ERR` / `Traceback` / `FETCH-DERAIL`) are scanned out of the child's own log
+**after the emulator is down** — deliberately, because a fault in the last of
+~160 transfers is not in the text scanned at boot — and reported as `faults`,
+`fault_markers`, `fault_before_round_trip`, `fault_after_round_trip`. A fault now
+bars **M8** explicitly and `landed` is gated on `fault_before_round_trip` only.
+
+**Re-run after the change (`--agreement-only`, the cheap arm): nothing moved.**
+`milestone M3`, `landed false`, guard PASS, agreement **12 of 12 REFUSED, 0
+answered, 0 unmeasured**, and now `faults 0`, `fault_markers []`, both fault
+fields `false`. ⚠ The expensive graded arms were **not** re-run — neither had
+completed before the ruling, so there is no verdict of theirs to re-verify, and
+the bound below is unaffected.
+
 ### Not measured in this session
 
 * **M5 stays UNDEFINED.** One EP0 control seam, one peer.

@@ -59,9 +59,13 @@ LADDER_RUNGS = ("M0", "M1", "M2", "M3", "M4", "M8")
 #: Facts the rung is a function of. Named so `enumerate_ladder.py` can
 #: quantify over them -- and see the module docstring of `check3.py` for why
 #: that enumeration is necessary and NOT sufficient.
-LADDER_FACTS = ("guest_executed", "own_init", "drives_own_interface",
+LADDER_FACTS = ("guest_executed", "fault_before_round_trip",
+                "fault_after_round_trip", "own_init", "drives_own_interface",
                 "round_trip", "inventory_parsed", "guard_ok",
                 "agreement_ok", "parity_full")
+
+#: Emulator-level fault markers, scanned out of the CHILD's own log.
+FAULT_MARKERS = ("UC_ERR", "Traceback (most recent call last)", "FETCH-DERAIL")
 
 
 def _ladder(f: dict) -> str:
@@ -73,6 +77,12 @@ def _ladder(f: dict) -> str:
     """
     if not f.get("guest_executed"):
         return "M0"
+    # §1a 2026-09-30: a fault BEFORE any round trip bars everything above M1; a
+    # fault after it does not un-boot the guest, but it is RECORDED and it bars
+    # M8, whose evidence comes after it. This row reported no fault count at
+    # all before that ruling -- the exact "bare faults=0" hole it names.
+    if f.get("fault_before_round_trip"):
+        return "M1"
     if not f.get("own_init"):
         return "M1"
     if not f.get("drives_own_interface"):
@@ -80,7 +90,8 @@ def _ladder(f: dict) -> str:
     if not f.get("round_trip"):
         return "M3"
     if not (f.get("inventory_parsed") and f.get("guard_ok")
-            and f.get("agreement_ok") and f.get("parity_full")):
+            and f.get("agreement_ok") and f.get("parity_full")
+            and f.get("no_fault_at_all")):
         return "M4"
     return "M8"
 
@@ -249,6 +260,8 @@ def run_parity(rounds: int = 3, control: Optional[str] = None,
         "control": control, "seed": seed, "nonce": "0x%08x" % nonce,
         "rounds_requested": rounds,
         "uptime_before": _uptime(), "uptime_after": None,
+        "faults": None, "fault_markers": None, "enumerated": None,
+        "fault_before_round_trip": None, "fault_after_round_trip": None,
         "inventory": None, "guard": None, "calibration": None,
         "entries": {}, "agreement": None,
         "agreement_before": None, "agreement_after": None,
@@ -282,6 +295,10 @@ def run_parity(rounds: int = 3, control: Optional[str] = None,
             "own_init": "ENDPTLISTADDR" in text or "USBCMD" in text,
             "drives_own_interface": enum_ok,
         }
+        # Recorded from the CHILD's own log, and re-read in the `finally` so a
+        # fault arriving late in a long sweep cannot be missed.
+        res["fault_markers"] = [m for m in FAULT_MARKERS if m in text]
+        res["enumerated"] = bool(enum_ok)
 
         inv = inventory.parse_log_line(text)
         res["inventory"] = inv
@@ -390,6 +407,24 @@ def run_parity(rounds: int = 3, control: Optional[str] = None,
         return res
     finally:
         rh.stop()
+        # Re-read the log AFTER the emulator is down: a fault in the last
+        # transfer of a 160-transfer sweep is not in the text we scanned at boot.
+        tail = rh.log_text()
+        res["fault_markers"] = [m for m in FAULT_MARKERS if m in tail]
+        res["faults"] = len(res["fault_markers"])
+        rt = bool(res.get("passed"))
+        faulted = bool(res["fault_markers"])
+        res["fault_before_round_trip"] = faulted and not rt
+        res["fault_after_round_trip"] = faulted and rt
+        f = res.get("facts")
+        if isinstance(f, dict):
+            f["no_fault_at_all"] = not faulted
+            f["fault_before_round_trip"] = res["fault_before_round_trip"]
+            f["fault_after_round_trip"] = res["fault_after_round_trip"]
+            res["milestone"] = _ladder(f)
+            # §1a 2026-09-30: gate `landed` on fault_before_round_trip ONLY.
+            res["landed"] = (rung_num(res["milestone"]) >= 4
+                             and not res["fault_before_round_trip"])
         res["uptime_after"] = _uptime()
         for k in env_extra:
             os.environ.pop(k, None)
@@ -418,6 +453,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             if k in res}
     slim["passed_n"] = len(res.get("passed") or [])
     slim["guard_ok"] = (res.get("guard") or {}).get("ok")
+    slim["faults"] = res.get("faults")
+    slim["fault_markers"] = res.get("fault_markers")
+    slim["fault_before_round_trip"] = res.get("fault_before_round_trip")
+    slim["fault_after_round_trip"] = res.get("fault_after_round_trip")
     slim["agreement_ok"] = (res.get("agreement") or {}).get("ok")
     slim["agreement_only"] = res.get("agreement_only")
     for k in ("agreement_before", "agreement_after"):
