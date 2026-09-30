@@ -31,6 +31,7 @@ from typing import Any, Optional, Tuple
 from halucinator import hal_log
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
 
+from .. import inventory
 from ..peripheral_models import hal_link, lpc43xx_usb0, usb_host
 
 log = hal_log.getHalLogger()
@@ -63,6 +64,49 @@ class BootInit(BPHandler):
             qemu.set_vtor(vtor)
         except Exception as exc:  # noqa: BLE001
             log.error("BootInit: set_vtor(0x%08x) failed: %s", vtor, exc)
+
+        # --- the M8 inventory, parsed out of GUEST memory, every run ---------
+        #
+        # RULES.md Rule 1: the parity denominator may not be "what we
+        # implemented". It is this image's own vendor-request dispatch array,
+        # and it is read here -- out of the bytes the machine actually loaded,
+        # at the reset vector, before the firmware has run one instruction --
+        # rather than off the disk. A parity run scrapes `M8-INVENTORY` from
+        # its own log, so its denominator provably came from that run's guest.
+        #
+        # HAL_HRF_INV_OFFSET is the falsification knob for the shrink guard:
+        # it slides the array read by n bytes, which is exactly how a sibling
+        # lane's ICP DAS menu parse turned (0,1,10,33) into [0,9,32,39].
+        try:
+            off = int(os.environ.get("HAL_HRF_INV_OFFSET", "0"), 0)
+            inv = inventory.derive(qemu.read_memory_bytes, table_offset=off)
+            log.info("%s", inventory.log_line(inv))
+            guard = inventory.check_guard(inv)
+            log.info("M8-INVENTORY-GUARD %s",
+                     "PASS" if guard["ok"] else "VOID %r" % guard["mismatches"])
+            # THE FALSIFICATION KNOB, and it is inside the GUEST.
+            #
+            # `cmp r3, #0x3a` is the firmware's own range check. Rewriting that
+            # one immediate byte before the CPU reaches it makes the FIRMWARE
+            # refuse requests it would otherwise dispatch, so the parity
+            # verdict has to collapse. If it does not, the verdict was never
+            # gated on the firmware's dispatcher at all -- which is the only
+            # thing a control-gated M8 claim can mean here. The inventory is
+            # parsed BEFORE the patch, so the denominator and the shrink guard
+            # are untouched and exactly one variable moves.
+            patch = os.environ.get("HAL_HRF_BOUND_PATCH")
+            if patch is not None:
+                new = int(patch, 0) & 0xFF
+                at = inv["bound_check_addr"]
+                before = qemu.read_memory_bytes(at, 2)
+                qemu.write_memory_bytes(at, bytes([new]) + before[1:2])
+                after = qemu.read_memory_bytes(at, 2)
+                log.info("M8-BOUND-PATCH at 0x%08x: %s -> %s (requested "
+                         "imm8=%d)", at, before.hex(), after.hex(), new)
+        except Exception as exc:  # noqa: BLE001
+            # Never swallow this: a parity run with no inventory line must
+            # fail, not quietly fall back to a denominator of its own.
+            log.error("M8-INVENTORY-ERROR %s: %s", type(exc).__name__, exc)
 
         usb = lpc43xx_usb0.get_usb()
         host = usb_host.get_host()

@@ -96,6 +96,18 @@ def _attack(args) -> int:
     return attack_main()
 
 
+def _parity(args) -> int:
+    from .parity import main as parity_main
+    argv = ["--rounds", str(args.rounds)]
+    if args.seed is not None:
+        argv += ["--seed", str(args.seed)]
+    if args.control:
+        argv += ["--control", args.control]
+    if args.json_out:
+        argv += ["--json-out", args.json_out]
+    return parity_main(argv)
+
+
 def _panel(args) -> int:
     from .hackrf_one_panel import main as panel_main
     sys.argv = ["rehostry-hackrf-one-panel", "--port", str(args.port)]
@@ -118,6 +130,15 @@ def main() -> int:
 
     p = sub.add_parser("attack", help="the conforming attack")
     p.set_defaults(func=_attack)
+
+    p = sub.add_parser("parity", help="M8 interface parity over the image's "
+                                      "own vendor-request dispatch array")
+    p.add_argument("--rounds", type=int, default=3)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--control", choices=("guard-offset", "bound-patch-0"),
+                   default=None)
+    p.add_argument("--json-out", default=None)
+    p.set_defaults(func=_parity)
 
     p = sub.add_parser("panel", help="the polling web panel")
     p.add_argument("--port", type=int,
