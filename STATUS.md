@@ -1,4 +1,4 @@
-<!-- rehostry-census: milestone=M7 landed=true verdict=M4-OK verified=2026-09-17 method=live-run n=5of5 note=M6-and-M7-measured-live-2026-09-17-lane-s0917-laneG;M6-5of5-RFFC5071-register-file-3-regs-hold-distinct-run-time-values;M7-6of6-classes-0-VOID-confined-to-requests-le-33;the-seam-stops-answering-after-request-38-with-the-guest-still-executing-UNEXPLAINED;M5-M8-undefined-one-EP0-control-seam -->
+<!-- rehostry-census: milestone=M7 landed=true verdict=M4-OK verified=2026-09-17 method=live-run n=none note=M8-UNDEFINED-to-DEFINED:inventory=the-images-own-59-slot-USB-vendor-request-dispatch-array-parsed-from-GUEST-MEMORY-every-run-bound-from-its-own-cmp-0x3a-and-membership-from-its-non-NULL-slots;59-declared-49-implemented-by-this-build-the-10-NULL-slots-are-the-firmware-saying-so;DENOMINATOR-FINISHED-and-control-gated-both-ways-bound-patch-0-gives-0of49-M3-and-guard-offset-VOIDS-at-50;agreement-12of12-REFUSED-on-a-healthy-seam;NUMERATOR-NOT-COMPLETELY-MEASURED-neither-graded-arm-finished-BOUND-n-in-6-to-40-of-49-NOT-a-parity-fraction;every-failure-is-OUT_STAGE-our-host-model-cannot-drive-a-host-to-device-data-stage-and-ZERO-non-NULL-slots-were-STALLed-so-the-shortfall-is-OUR-harness-NOT-the-firmware;M5-still-undefined-one-EP0-control-seam-one-peer;verified-date-is-the-M6-M7-run-of-2026-09-17-which-THIS-session-did-NOT-re-run;M1-to-M4-re-measured-live-2026-09-29-lane-s0929-laneL;the-post-request-38-deaf-seam-is-still-UNEXPLAINED -->
 <!-- Copyright 2026 Christopher Wright; SPDX-License-Identifier: AGPL-3.0-or-later -->
 # STATUS — device-hackrf-one
 
@@ -174,10 +174,15 @@ the client dialling 21209.
   returned nothing. Whether that is the firmware or our host USB model is
   **unresolved**, and it is why the M7 classes are confined to requests ≤ 33.
   **An unexplored region is not a tolerance claim** — it is unfinished work.
-* **M5 and M8 are UNDEFINED.** This image's entire command surface is vendor
-  control transfers on USB0 EP0 — one endpoint, one framing layer, one peer —
-  which §1a settles as one interface, and a one-entry inventory is M8-undefined
-  per §1b's boundary. M6/M7 do not require M5 (§1a ruling, 2026-09-02).
+* **M5 is UNDEFINED.** This image's entire command surface is vendor control
+  transfers on USB0 EP0 — one endpoint, one framing layer, one peer — which
+  §1a settles as one interface. M6/M7 do not require M5 (§1a ruling, 2026-09-02).
+* **M8 is NO LONGER UNDEFINED.** §1a's ruling of 2026-09-29 makes an M8 entry a
+  **declared capability on a seam**, not a §1a-independent interface, so this
+  image's dispatch array supplies **49** of them. The denominator is finished and
+  control-gated; the **numerator is not measured to completion** — see "M8
+  interface parity" below, which reports a BOUND and says so. A graded M8 and an
+  undefined M5 sit together without tension (§1b).
 
 ---
 
@@ -416,3 +421,200 @@ rehostry-hackrf-one probe 15 14 45 46 13          # ask it things directly
 rehostry-hackrf-one-panel                         # http://127.0.0.1:9019
 python3 -m pytest tests/ -q                       # 29 structural tests, no emulator
 ```
+
+---
+
+## M8 interface parity — DEFINED at 49, UNMET, and the numerator is NOT COMPLETELY MEASURED
+
+Lane `s0929-laneL`, 2026-09-29/30. `PREDICTIONS-M8.md` was committed **before** any
+graded run (`2513848`, 22:57:41 −0500). **No number here was improved by removing
+an entry.** The denominator went from an undefined 1 to a measured **49**, which
+§1a's ruling of 2026-09-29 says is the correct direction.
+
+⚠ **Read the honest shape of this result first.** The **denominator is finished**:
+derived from the guest's own bytes every run, pre-registered, and control-gated in
+both directions. The **numerator is not**: neither graded arm completed inside the
+session, so what is reported below is a **BOUND**, `n ∈ [6, 40] of 49`, and
+it is labelled as a bound wherever it appears. **It is not a parity fraction and
+must not be quoted as one.**
+
+### What changed, and what did NOT
+
+`attack.py`'s own comment said *"the inventory has one entry, which §1b's boundary
+puts at M8-undefined"*. The **M5 half still stands** — one EP0 control seam, one
+framing layer, one peer, so **M5 remains UNDEFINED**. The M8 half is overturned by
+§1a's 2026-09-29 ruling: an entry is a **declared capability on a seam the
+firmware exposes**, not a §1a-independent interface, and the fleet already grades
+`vesc-bms` at 16 COMM packets over one CAN link on exactly that reading.
+
+### The denominator: 59 declared slots, 49 implemented by THIS image
+
+Seven instructions, and they are the whole specification:
+
+```
+0x0430  43 78        ldrb    r3, [r0, #1]        ; setup.bRequest
+0x0432  3a 2b        cmp     r3, #0x3a           ; THE BOUND -> 0..58 = 59 slots
+0x0434  04 d8        bhi     0x440               ;   out of range -> STALL
+0x0436  03 4a        ldr     r2, [pc, #0xc]      ; literal @0x444 = 0x00008524
+0x0438  52 f8 23 30  ldr.w   r3, [r2, r3, lsl #2]
+0x043c  03 b1        cbz     r3, 0x440           ;   NULL slot  -> STALL
+0x043e  18 47        bx      r3
+0x0440  01 20        movs    r0, #1              ; USB_REQUEST_STATUS_STALL
+```
+
+`inventory.py` hardcodes none of that. It searches **guest memory** for the
+*shape* (`ldr.w Rt,[Rn,Rm,lsl #2]` + `cbz Rt` + `bx Rt`, preceded by
+`cmp Rm,#imm8` + cond-branch + `ldr Rn,[pc,#imm]`), requires **exactly one**
+match, and decodes the bound from the `cmp` and the base from the literal pool.
+Zero or two matches **raise** rather than guess. It runs at the reset vector,
+before the CPU has executed anything, so every run scrapes its denominator out of
+**that run's own guest** (`M8-INVENTORY` in the log) and not off the disk.
+
+* `slots_declared` = **59**, `bound_imm` = `0x3A`, `table_addr` = `0x00008524`
+* `null_indices` = `[0, 13, 22, 49, 50, 51, 52, 53, 54, 55]` — **10 slots this build does not implement**
+* `implemented` = **49** — the graded denominator
+* `table_sha256` = `20c8322b84ef0fc4d0a2429fc0c94a8186175ca6c563de807bbdae1c91e446f3`
+
+**§1d: the 10 removals are justified from the independent source itself.** A NULL
+slot is the firmware saying it does not serve that request; never "we did not
+implement it". Both numbers are reported so a reader can re-derive either.
+Cross-check against the published `hackrf_vendor_request` set: the gaps at **13**
+and **22** are the two requests upstream retired (`write_cpld`, `set_if_freq`) —
+independent corroboration that this is the vendor-request array. ⚠ The published
+set is a cross-check only; the graded denominator is the image's.
+
+⚠ **49 IS A FLOOR, not a ceiling.** This counts the *vendor*-request
+dispatcher. The firmware has a second, separate dispatcher for USB **standard**
+requests; a stricter future reading could count some of those too. Enumeration is
+arguably substrate (the ARP/ICMP analogy), which is why they are excluded here —
+but that judgement is stated rather than assumed, and a re-derivation that grows
+this number is the correct direction.
+
+⚠ **On RULES.md §1a's quarantine of batch `s0929`:** the ruling says s0929
+denominators "were derived under the narrower reading, so they are floors" and
+that a fleet-wide re-derivation is a separate job, *"not retrofitted per row"*.
+That protects rows that **already had** a narrower denominator; a sibling lane
+correctly declined to grow its 14 on those grounds. **This row had none — M8 was
+UNDEFINED** — so defining one is not a retrofit.
+
+### The denominator IS control-gated, in both directions
+
+| control | what moved | result |
+|---|---|---|
+| `--control bound-patch-0` | the firmware's own `cmp r3,#0x3a` rewritten **in guest memory, after the parse** — `M8-BOUND-PATCH at 0x00000432: 3a2b -> 002b` | guard still **PASS**, denominator still **49**, every entry fails, `parity 0/49`, rung **M3**, `landed false` |
+| `--control guard-offset` | the array read slid 4 bytes | `M8-INVENTORY-GUARD VOID`: `null_indices` parsed as `[12, 21, 48, 49, 50, 51, 52, 53, 54]` and `implemented` as **50** — a denominator that **grew by one and moved every index** |
+
+The second is the same shape a sibling lane hit on ICP DAS, where a 4-byte slip
+turned `(0,1,10,33)` into `[0,9,32,39]`, and `PREDICTIONS-M8.md` PREDICTION 6
+named those exact values **before** the run. ⚠ In the bound-patch arm the canary
+is itself a vendor request, so no latency could be measured and the silence bound
+fell to its 15 s floor — stated, because a floor is not a calibration. ⚠ The
+guard-offset arm was **reaped early by explicit pid** once its verdict was in the
+log; the control's whole claim is settled at the reset vector.
+
+### The agreement control counts REPLIES, and silence is not refusal
+
+All 10 NULL slots plus two out-of-range requests (59, 255), on a seam the
+calibration had just proven healthy: **12 of 12 REFUSED, 0 answered, 0
+unmeasured**, with `ENDPTCTRL0 STALL set by the firmware (0x00010001)` in the log
+— the firmware's own write. That is PREDICTION 3.
+
+⚠ **This control was wrong the first time and a run showed it.** It read
+`refused = got is not None and got["stalled"]`, so a probe that got **no reply**
+counted as not-refused; and it ran only *after* the 49-entry sweep, by which time
+this seam has gone deaf. The nonce arm therefore reported **0 of 12** refusals on
+a firmware that had written its own stall bit earlier in the same run — **a run
+budget was classifying.** Each probe is now REFUSED / ANSWERED / **UNMEASURED**,
+an UNMEASURED probe **VOIDS** the control rather than failing it, and it runs
+before the entry sweep as well as after.
+
+### The numerator: a BOUND, from two arms neither of which finished
+
+| | arm A | arm B |
+|---|---|---|
+| per-transfer poll budget | written-down `STALL_STEPS = 400` | **derived**: 20 × its own worst successful transfer (**2** polls) → **60** |
+| entries fully measured | **13** | 12 (+1 partial) |
+| `DRIVEN` 3 of 3 | `[3, 5, 9, 12, 14, 15]` | `[3, 5, 9, 12, 14]` |
+| not driven, all rounds seen | `[1, 2, 4, 6, 7, 8, 10, 11, 16]` | `[1, 2, 4, 6, 7, 8, 10, 11]` |
+| emulator log lines per transfer | ~310 | **~65** |
+| reached | entry 24 of 49 in ~57 min | entry 15 of 49 in ~7 min |
+
+**`n ∈ [6, 40] of 49`** — lower bound = entries `DRIVEN` 3 of 3; upper bound
+adds every entry not yet reached. ⚠ **Not a parity number.**
+
+⭐ **The two arms agree on 13 of 13 entries both fully measured.** The only
+variable between them is the poll budget, so the reduction from 400 to 60
+**changed no verdict** — which is the check RULES.md §2a asks for before
+believing a harness change. The 400 was 200× the worst observed good transfer and
+cost ~5× the emulation work for nothing.
+
+### ⚠⚠ THE SHORTFALL IS IN THIS HARNESS, NOT IN THE FIRMWARE
+
+With benign parameters (`wValue = wIndex = 0`) the firmware **STALLed zero**
+non-NULL slots across both graded arms. Every single failure is `OUT_STAGE` — *no
+reply*, because the handler wants a **host→device** data stage that this row's USB
+host model does not drive. That is a limitation of **our model**, and those
+entries are **NOT MEASURED at M4 — they are not refused by the firmware.**
+
+⚠ **And part of it is a mis-probe, not even a model gap.** The probe sends
+`wLength = 0x20`, which forces a data stage on requests that carry their whole
+payload in `wValue`/`wIndex` and have **no data stage at all**. Those would
+complete as `ROUTED` at `wLength = 0`. The probe should try `0x20` and fall back
+to `0`; it does not. **Extending the host model to drive an OUT data stage, and
+fixing the `wLength` fallback, are the two highest-value changes for this row's
+parity** — and neither is a firmware fact.
+
+### The nonce-parameter arm, kept as a negative control
+
+The graded rounds use `wValue = wIndex = 0`. They originally carried a per-run
+nonce, and measured live that made the firmware's **own handlers** STALL **9 of
+the first 12** entries — `write_max2837(reg=garbage)`, `read_si5351c(reg=garbage)`
+and so on. A random register address *is* an invalid register address: those
+refusals were correct firmware behaviour and a **defect in the probe**. The arm is
+kept because it is a real negative control — *plausible but wrong parameters must
+be refused by the firmware's own checker* — and it was: **14 stalls and 10
+no-replies of 49**. ⚠ It also predates the Rule 2 fix and was credited M4 off
+`--rounds 1`; it carries no claim.
+
+### Defects in this lane's own code
+
+1. **Rule 2 was not enforced.** Per-entry `ok` was `npass == rounds and rounds >
+   0` — satisfied by **one** exchange. Fixed to `rounds > 1`. Caught by this
+   lane's own check 3 at the observation layer, and re-scoring this row's
+   `--rounds 1` arm through the fixed predicate turns **M4 / 7-of-49** into
+   **M3 / 0-of-49** (`scratch-batch-s0929-laneL/RESCORE-prefix-artifacts.txt`).
+2. **The agreement control let a budget classify** (above).
+3. **`STALL_STEPS = 400` was a written-down harness constant** doing the job of a
+   measurement (above).
+4. **`checks.py` itself produced one FALSE hit** against `bound-patch-0`: it
+   proxied "drives its own interface" with canary latencies, and the canary is a
+   *vendor* request that arm exists to break. The row's M3 was right and the
+   instrument was wrong. Recorded rather than quietly corrected.
+5. **The log directory name does not distinguish arms** — `hackrf-parity-<pid>-
+   default` for the graded, agreement-only and nonce arms alike. Unique per run
+   (the hard requirement), but not attributable by eye.
+6. **The per-run seed is not what its comment claims.** `abs(hash(<pkg name>))`
+   is randomised per process, so it is a fresh random seed every run (recorded in
+   each JSON: 450683804, 784049394, 880815053), not a stable per-row value. It does guarantee the three
+   rows never share one, and with benign parameters it no longer feeds the verdict.
+
+All of these, and the check-3 adjudication, are written up in
+`scratch-batch-s0929-laneL/CHECK3-ADJUDICATION.md`.
+
+### Not measured in this session
+
+* **M5 stays UNDEFINED.** One EP0 control seam, one peer.
+* M6 and M7 were not re-run; those rungs stand on 2026-09-17.
+* **The numerator.** 34 of 49 entries were never reached. Both arms were
+  **reaped by explicit pid** (client, then the emulator child explicitly, because
+  a SIGTERM to the client skips its `finally` — which is how the guard-offset arm
+  orphaned a listener earlier in this session). Ports confirmed released,
+  firmware sha256 unchanged before and after.
+* `STATUS.md` already records that *"the seam stops answering after request 38
+  with the guest still executing"*. This session **reproduced deaf-seam behaviour**
+  — the agreement control measured 0 of 12 at the end of a 49-entry sweep while
+  the same firmware answered 12 of 12 at the start — but did **not** explain it,
+  and did not reach request 38 in a graded arm. Still UNEXPLAINED.
+* Box load 11.7–18.5 with eight other lanes. Every wall-clock figure is
+  **provisional**; the silence bound is derived per run and the poll budget from
+  the run's own worst successful transfer, so neither is a device constant.

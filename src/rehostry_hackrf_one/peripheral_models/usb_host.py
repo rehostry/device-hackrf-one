@@ -101,9 +101,34 @@ class Transfer:
 class UsbHost:
     """Drives bus reset, enumeration and then vendor control transfers."""
 
-    #: Steps to wait for a reply before declaring the endpoint dead. A control
-    #: transfer here needs a handful of ISR entries, not hundreds.
-    STALL_STEPS = 400
+    #: Ceiling on the poll budget for one transfer. ⚠ THIS IS A HARNESS
+    #: CONSTANT, NOT A DEVICE CONSTANT, and at 400 it dominated the cost of a
+    #: 49-entry x 3-round parity sweep: every non-answering transfer burned 400
+    #: guest ISR polls, and the graded run of 2026-09-29 slowed from ~44 s to
+    #: ~100 s per transfer once it reached the requests this seam does not
+    #: answer.
+    #:
+    #: So the budget is now SELF-CALIBRATING and paced by the GUEST, not by a
+    #: stopwatch: `_worst_good` tracks the largest poll count any **successful**
+    #: transfer needed in THIS run, and the live budget is a generous multiple
+    #: of it. That is the same discipline as deriving a silence bound from a
+    #: run's own worst known-good latency, applied to guest polls instead of
+    #: wall clock -- which is strictly better, because it does not move when
+    #: eight other lanes load the box.
+    #:
+    #: ⚠ Direction of risk, stated: a tighter budget can only make a FAILURE
+    #: arrive sooner. It can never turn a failure into a success. The hazard is
+    #: the opposite -- turning a slow success into a false failure -- which is
+    #: why the multiple is 20x and why both numbers are logged on every timeout,
+    #: so a timeout that came anywhere near the worst good transfer is visible.
+    STALL_STEPS = int(os.environ.get("HAL_HRF_STALL_STEPS", "400"))
+
+    #: Floor, until a successful transfer has been seen. Enumeration completes
+    #: inside this, so it is measured before the budget is ever needed.
+    STALL_STEPS_FLOOR = int(os.environ.get("HAL_HRF_STALL_FLOOR", "60"))
+
+    #: Multiple of the worst SUCCESSFUL transfer's poll count.
+    STALL_STEPS_FACTOR = int(os.environ.get("HAL_HRF_STALL_FACTOR", "20"))
 
     def __init__(self) -> None:
         self.state = "wait_run"
@@ -118,6 +143,8 @@ class UsbHost:
         self.log_lines: List[str] = []
         self.vid_pid: Optional[Tuple[int, int]] = None
         self._wait = 0
+        #: the largest poll count any SUCCESSFUL transfer needed in this run
+        self._worst_good = 0
         self._lock = threading.RLock()
         self._clients: List[Any] = []
         self._srv: Optional[socket.socket] = None
@@ -205,10 +232,13 @@ class UsbHost:
             return
 
         self._wait += 1
-        if self._wait > self.STALL_STEPS:
+        if self._wait > self.budget():
             t.status = "timeout"
-            self._note("host: no reply after %d steps  [%s]"
-                       % (self._wait, t.label))
+            self._note("host: no reply after %d steps (budget %d = max(%d, %d x "
+                       "worst-good %d), capped %d)  [%s]"
+                       % (self._wait, self.budget(), self.STALL_STEPS_FLOOR,
+                          self.STALL_STEPS_FACTOR, self._worst_good,
+                          self.STALL_STEPS, t.label))
             self._finish(t)
             return
 
@@ -245,7 +275,18 @@ class UsbHost:
             self._finish(t)
             return
 
+    def budget(self) -> int:
+        """This run's own poll budget for one transfer, paced by the guest."""
+        derived = self._worst_good * self.STALL_STEPS_FACTOR
+        return min(self.STALL_STEPS, max(self.STALL_STEPS_FLOOR, derived))
+
     def _finish(self, t: Transfer) -> None:
+        # Record what a SUCCESSFUL transfer actually cost, so the budget for the
+        # next one is derived from this run rather than written down.
+        if t.status == "ok" and self._wait > self._worst_good:
+            self._worst_good = self._wait
+            self._note("host: worst successful transfer so far took %d poll(s); "
+                       "budget is now %d" % (self._wait, self.budget()))
         self.current = None
         self.state = "idle"
         self.done.append(t)
